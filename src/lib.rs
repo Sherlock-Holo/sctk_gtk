@@ -22,34 +22,26 @@ use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::{SubcompositorState, SubsurfaceData};
 
+use crate::layout::get_button_layout;
 use crate::pointer::{ButtonKind, Location, MouseState};
 
+mod layout;
 mod pointer;
 
 const HEADER_SIZE: u32 = 50;
 static GTK_INIT_ONCE: Once = Once::new();
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ButtonState {
     x: i32,
     y: i32,
     width: u32,
     height: u32,
+    button_kind: ButtonKind,
 }
 
 #[derive(Debug)]
-pub struct GtkFrame<State> {
-    /// The base surface used to create the window.
-    // base_surface: WlTyped<WlSurface, SurfaceData>,
-
-    // compositor: Arc<CompositorState>,
-
-    /// Subcompositor to create/drop subsurfaces ondemand.
-    // subcompositor: Arc<SubcompositorState>,
-
-    /// Queue handle to perform object creation.
-    queue_handle: QueueHandle<State>,
-
+pub struct GtkFrame {
     /// The drawable decorations, `None` when hidden.
     hidden: bool,
 
@@ -70,7 +62,7 @@ pub struct GtkFrame<State> {
     width: Option<NonZeroU32>,
     height: Option<NonZeroU32>,
 
-    // cursor_pos: Option<(f64, f64)>,
+    /*// cursor_pos: Option<(f64, f64)>,
     allow_min_button: bool,
     min_button_state: Option<ButtonState>,
 
@@ -78,7 +70,9 @@ pub struct GtkFrame<State> {
     max_button_state: Option<ButtonState>,
 
     allow_close_button: bool,
-    close_button_state: Option<ButtonState>,
+    close_button_state: Option<ButtonState>,*/
+    buttons_at_end: bool,
+    buttons: Vec<ButtonState>,
 
     state: WindowState,
     wm_capabilities: WindowManagerCapabilities,
@@ -89,10 +83,7 @@ pub struct GtkFrame<State> {
     header_bar_subsurface: WlSubsurface,
 }
 
-impl<State> DecorationsFrame for GtkFrame<State>
-where
-    State: Dispatch<WlSurface, SurfaceData> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
-{
+impl DecorationsFrame for GtkFrame {
     fn on_click(
         &mut self,
         timestamp: Duration,
@@ -123,8 +114,6 @@ where
         x: f64,
         y: f64,
     ) -> Option<CursorIcon> {
-        println!("cursor position ({x}:{y})");
-
         let (width, height) = match (self.width, self.height) {
             (Some(width), Some(height)) => (width.get(), height.get()),
             _ => return Some(CursorIcon::Default),
@@ -244,54 +233,31 @@ where
     }
 }
 
-impl<State> GtkFrame<State>
-where
-    State: 'static + Dispatch<WlSubsurface, SubsurfaceData> + Dispatch<WlSurface, SurfaceData>,
-{
-    fn update_dirty_by_button_cursor_pos(&mut self) {
-        if !self.mouse.in_frame() {
-            return;
-        }
+impl GtkFrame {}
 
-        if let (Some(state), Some(cursor_pos)) = (&self.min_button_state, self.mouse.cursor_pos) {
-            if Self::in_button(cursor_pos, state) {
-                self.dirty = true;
-            }
-        }
-
-        if let (Some(state), Some(cursor_pos)) = (&self.close_button_state, self.mouse.cursor_pos) {
-            if Self::in_button(cursor_pos, state) {
-                self.dirty = true;
-            }
-        }
-    }
-}
-
-impl<State> GtkFrame<State>
-where
-    State: Dispatch<WlSurface, SurfaceData> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
-{
-    pub fn new(
+impl GtkFrame {
+    pub fn new<State>(
         base_surface: &impl WaylandSurface,
         shm: &Shm,
-        subcompositor: Arc<SubcompositorState>,
+        sub_compositor: Arc<SubcompositorState>,
         queue_handle: QueueHandle<State>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Self>
+    where
+        State: Dispatch<WlSurface, SurfaceData> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
+    {
         GTK_INIT_ONCE
             .call_once(|| gtk::init().unwrap_or_else(|err| panic!("gtk init failed: {err}")));
 
+        let (at_end, buttons) = get_button_layout();
+
         let (subsurface, surface) =
-            subcompositor.create_subsurface(base_surface.wl_surface().clone(), &queue_handle);
+            sub_compositor.create_subsurface(base_surface.wl_surface().clone(), &queue_handle);
 
         subsurface.set_sync();
 
         let pool = SlotPool::new(1, shm)?;
 
         Ok(Self {
-            // base_surface: (),
-            // compositor: (),
-            // subcompositor: (),
-            queue_handle,
             hidden: false,
             pool,
             dirty: true,
@@ -300,12 +266,17 @@ where
             resizable: true,
             width: None,
             height: None,
-            allow_min_button: true,
-            min_button_state: None,
-            allow_max_button: true,
-            max_button_state: None,
-            allow_close_button: true,
-            close_button_state: None,
+            buttons_at_end: at_end,
+            buttons: buttons
+                .into_iter()
+                .map(|kind| ButtonState {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                    button_kind: kind,
+                })
+                .collect(),
             state: WindowState::empty(),
             wm_capabilities: WindowManagerCapabilities::all(),
             // mouse: (),
@@ -317,7 +288,22 @@ where
     }
 }
 
-impl<State> GtkFrame<State> {
+impl GtkFrame {
+    fn update_dirty_by_button_cursor_pos(&mut self) {
+        if !self.mouse.in_frame() {
+            return;
+        }
+
+        if let Some(cursor_pos) = self.mouse.cursor_pos {
+            for state in &self.buttons {
+                if Self::in_button(cursor_pos, state) {
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+    }
+
     fn mouse_location(
         &self,
         x: f64,
@@ -347,21 +333,9 @@ impl<State> GtkFrame<State> {
         } else if x > 5.0 && x < (width - 5) as _ && y > (width - 5) as _ {
             Location::Bottom
         } else if cursor_in_frame {
-            if let Some(state) = &self.min_button_state {
+            for state in &self.buttons {
                 if Self::in_button((x, y), state) {
-                    return Location::Button(ButtonKind::Minimize);
-                }
-            }
-
-            if let Some(state) = &self.close_button_state {
-                if Self::in_button((x, y), state) {
-                    return Location::Button(ButtonKind::Close);
-                }
-            }
-
-            if let Some(state) = &self.max_button_state {
-                if Self::in_button((x, y), state) {
-                    return Location::Button(ButtonKind::Maximize);
+                    return Location::Button(state.button_kind);
                 }
             }
 
@@ -376,8 +350,6 @@ impl<State> GtkFrame<State> {
     }
 
     fn draw_head_bar(&mut self) -> anyhow::Result<bool> {
-        println!("draw head bar");
-
         // Reset the dirty bit.
         self.dirty = false;
         let should_sync = mem::take(&mut self.should_sync);
@@ -413,63 +385,42 @@ impl<State> GtkFrame<State> {
         let cairo_context = Context::new(image_surface)?;
         let header_bar = HeaderBar::builder().title(&self.title).build();
 
-        let close_button = if self.allow_close_button {
-            let button = self.create_close_button();
-            self.close_button_state.get_or_insert_with(Default::default);
+        let buttons = self
+            .buttons
+            .iter()
+            .map(|button_state| {
+                let button = match button_state.button_kind {
+                    ButtonKind::Close => self.create_close_button(),
+                    ButtonKind::Maximize => self.create_max_button(),
+                    ButtonKind::Minimize => self.create_min_button(),
+                };
 
-            button.show_all();
-            header_bar.pack_end(&button);
+                button.show_all();
 
-            Some(button)
-        } else {
-            None
-        };
+                if self.buttons_at_end {
+                    header_bar.pack_end(&button);
+                } else {
+                    header_bar.pack_start(&button);
+                }
 
-        let min_button = if self.allow_min_button
-            && self
-                .wm_capabilities
-                .intersects(WindowManagerCapabilities::MINIMIZE)
-        {
-            let button = self.create_min_button();
-            self.min_button_state.get_or_insert_with(Default::default);
-
-            button.show_all();
-            header_bar.pack_end(&button);
-
-            Some(button)
-        } else {
-            None
-        };
+                button
+            })
+            .collect::<Vec<_>>();
 
         let offscreen_window = OffscreenWindow::new();
         offscreen_window.set_default_size(width as _, height as _);
         offscreen_window.add(&header_bar);
         offscreen_window.show_all();
 
-        if let Some(button) = close_button {
+        for (button, state) in buttons.into_iter().zip(&mut self.buttons) {
             let allocation = button.allocation();
 
-            if let Some(state) = self.close_button_state.as_mut() {
-                state.x = allocation.x();
-                state.y = allocation.y();
-                state.width = allocation.width() as _;
-                state.height = allocation.height() as _;
+            state.x = allocation.x();
+            state.y = allocation.y();
+            state.width = allocation.width() as _;
+            state.height = allocation.height() as _;
 
-                Self::apply_button_state(&self.mouse, &button, state);
-            }
-        }
-
-        if let Some(button) = min_button {
-            let allocation = button.allocation();
-
-            if let Some(state) = self.min_button_state.as_mut() {
-                state.x = allocation.x();
-                state.y = allocation.y();
-                state.width = allocation.width() as _;
-                state.height = allocation.height() as _;
-
-                Self::apply_button_state(&self.mouse, &button, state);
-            }
+            Self::apply_button_state(&self.mouse, &button, state);
         }
 
         // make sure gtk can draw cairo context
@@ -509,8 +460,6 @@ impl<State> GtkFrame<State> {
 
         if let Some(cursor_pos) = mouse.cursor_pos {
             if Self::in_button(cursor_pos, state) {
-                println!("in button");
-
                 state_flags |= StateFlags::PRELIGHT;
             }
         }
@@ -543,6 +492,20 @@ impl<State> GtkFrame<State> {
         style_context.add_class("titlebutton");
         style_context.add_class("minimize");
         let image = Image::from_icon_name(Some("window-minimize-symbolic"), IconSize::Menu);
+        image.set_use_fallback(true);
+        button.add(&image);
+        button.set_can_focus(false);
+
+        button
+    }
+
+    fn create_max_button(&self) -> Button {
+        let button = Button::new();
+        button.set_valign(Align::Center);
+        let style_context = button.style_context();
+        style_context.add_class("titlebutton");
+        style_context.add_class("maximize");
+        let image = Image::from_icon_name(Some("window-maximize-symbolic"), IconSize::Menu);
         image.set_use_fallback(true);
         button.add(&image);
         button.set_can_focus(false);

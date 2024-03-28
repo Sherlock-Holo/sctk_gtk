@@ -133,7 +133,7 @@ struct SimpleWindow {
     shift: Option<u32>,
     buffer: Option<Buffer>,
     window: Window,
-    window_frame: Option<GtkFrame<Self>>,
+    window_frame: Option<GtkFrame>,
     themed_pointer: Option<ThemedPointer>,
     set_cursor: bool,
     cursor_icon: CursorIcon,
