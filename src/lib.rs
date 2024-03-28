@@ -1,7 +1,7 @@
-use std::mem;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
 use std::time::Duration;
+use std::{array, mem};
 
 use cairo::{Context, Format, ImageSurface};
 use gtk::prelude::{
@@ -21,14 +21,20 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::subcompositor::{SubcompositorState, SubsurfaceData};
+use tiny_skia::{Color, PixmapMut, Rect, Transform};
 
 use crate::layout::get_button_layout;
 use crate::pointer::{ButtonKind, Location, MouseState};
+use crate::shadow::{Shadow, ShadowPart, ShadowSurface, Theme as ShadowTheme};
 
 mod layout;
 mod pointer;
+mod shadow;
 
 const HEADER_SIZE: u32 = 50;
+const BORDER_SIZE: u32 = 10;
+const VISIBLE_BORDER_SIZE: u32 = 1;
+
 static GTK_INIT_ONCE: Once = Once::new();
 
 #[derive(Debug)]
@@ -62,15 +68,6 @@ pub struct GtkFrame {
     width: Option<NonZeroU32>,
     height: Option<NonZeroU32>,
 
-    /*// cursor_pos: Option<(f64, f64)>,
-    allow_min_button: bool,
-    min_button_state: Option<ButtonState>,
-
-    allow_max_button: bool,
-    max_button_state: Option<ButtonState>,
-
-    allow_close_button: bool,
-    close_button_state: Option<ButtonState>,*/
     buttons_at_end: bool,
     buttons: Vec<ButtonState>,
 
@@ -81,6 +78,10 @@ pub struct GtkFrame {
 
     header_bar_surface: WlSurface,
     header_bar_subsurface: WlSubsurface,
+
+    shadow: Shadow,
+    shadow_surfaces: [ShadowSurface; 4],
+    shadow_theme: ShadowTheme,
 }
 
 impl DecorationsFrame for GtkFrame {
@@ -119,7 +120,7 @@ impl DecorationsFrame for GtkFrame {
             _ => return Some(CursorIcon::Default),
         };
 
-        let cursor_in_frame = self.header_bar_surface.id() == *surface_id;
+        let cursor_in_frame = self.get_cursor_area(surface_id);
         let mouse_location = self.mouse_location(x, y, width, height, cursor_in_frame);
 
         let cursor_icon = self
@@ -158,6 +159,27 @@ impl DecorationsFrame for GtkFrame {
     fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) {
         self.width = Some(width);
         self.height = Some(height);
+
+        let width = width.get();
+        let height = height.get();
+
+        // top
+        let shadow_surface = &mut self.shadow_surfaces[ShadowPart::Top.index()];
+        shadow_surface.width = width + 2 * BORDER_SIZE;
+
+        // bottom
+        let shadow_surface = &mut self.shadow_surfaces[ShadowPart::Bottom.index()];
+        shadow_surface.width = width + 2 * BORDER_SIZE;
+        shadow_surface.y = height as _;
+
+        // left
+        let shadow_surface = &mut self.shadow_surfaces[ShadowPart::Left.index()];
+        shadow_surface.height = height + HEADER_SIZE;
+
+        // right
+        let shadow_surface = &mut self.shadow_surfaces[ShadowPart::Right.index()];
+        shadow_surface.height = height + HEADER_SIZE;
+        shadow_surface.x = width as _;
     }
 
     fn set_scaling_factor(&mut self, scale_factor: f64) {
@@ -222,18 +244,17 @@ impl DecorationsFrame for GtkFrame {
     }
 
     fn draw(&mut self) -> bool {
-        self.draw_head_bar().unwrap_or(false)
+        let should_sync = self.draw_head_bar().unwrap_or(false);
+        let _ = self.draw_shadow(should_sync);
+
+        should_sync
     }
 
     fn set_title(&mut self, title: impl Into<String>) {
         self.title = title.into();
         self.dirty = true;
-
-        println!("set title {}", self.title);
     }
 }
-
-impl GtkFrame {}
 
 impl GtkFrame {
     pub fn new<State>(
@@ -248,7 +269,17 @@ impl GtkFrame {
         GTK_INIT_ONCE
             .call_once(|| gtk::init().unwrap_or_else(|err| panic!("gtk init failed: {err}")));
 
-        let (at_end, buttons) = get_button_layout();
+        let (buttons_at_end, buttons) = get_button_layout();
+        let buttons = buttons
+            .into_iter()
+            .map(|kind| ButtonState {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                button_kind: kind,
+            })
+            .collect();
 
         let (subsurface, surface) =
             sub_compositor.create_subsurface(base_surface.wl_surface().clone(), &queue_handle);
@@ -256,6 +287,21 @@ impl GtkFrame {
         subsurface.set_sync();
 
         let pool = SlotPool::new(1, shm)?;
+
+        let mut shadow_surfaces = array::from_fn(|_| {
+            let (subsurface, surface) =
+                sub_compositor.create_subsurface(base_surface.wl_surface().clone(), &queue_handle);
+
+            ShadowSurface {
+                surface,
+                subsurface,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            }
+        });
+        init_shadow_surfaces_pos(&mut shadow_surfaces);
 
         Ok(Self {
             hidden: false,
@@ -266,17 +312,8 @@ impl GtkFrame {
             resizable: true,
             width: None,
             height: None,
-            buttons_at_end: at_end,
-            buttons: buttons
-                .into_iter()
-                .map(|kind| ButtonState {
-                    x: 0,
-                    y: 0,
-                    width: 0,
-                    height: 0,
-                    button_kind: kind,
-                })
-                .collect(),
+            buttons_at_end,
+            buttons,
             state: WindowState::empty(),
             wm_capabilities: WindowManagerCapabilities::all(),
             // mouse: (),
@@ -284,11 +321,41 @@ impl GtkFrame {
             title: String::new(),
             header_bar_surface: surface,
             header_bar_subsurface: subsurface,
+            shadow: Default::default(),
+            shadow_surfaces,
+            shadow_theme: ShadowTheme::auto(),
         })
     }
-}
 
-impl GtkFrame {
+    fn get_cursor_area(&mut self, surface_id: &ObjectId) -> CursorArea {
+        if self.header_bar_surface.id() == *surface_id {
+            return CursorArea::Frame;
+        } else {
+            match self
+                .shadow_surfaces
+                .iter()
+                .enumerate()
+                .find_map(|(index, shadow_surface)| {
+                    (shadow_surface.surface.id() == *surface_id).then_some(index)
+                }) {
+                None => CursorArea::Window,
+                Some(index) => {
+                    if index == ShadowPart::Top.index() {
+                        CursorArea::TopShadow
+                    } else if index == ShadowPart::Left.index() {
+                        CursorArea::LeftShadow
+                    } else if index == ShadowPart::Right.index() {
+                        CursorArea::RightShadow
+                    } else if index == ShadowPart::Bottom.index() {
+                        CursorArea::BottomShadow
+                    } else {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+    }
+
     fn update_dirty_by_button_cursor_pos(&mut self) {
         if !self.mouse.in_frame() {
             return;
@@ -310,9 +377,86 @@ impl GtkFrame {
         y: f64,
         width: u32,
         height: u32,
-        cursor_in_frame: bool,
+        cursor_area: CursorArea,
     ) -> Location {
-        if x <= 5.0 && y <= 5.0 {
+        match cursor_area {
+            CursorArea::Frame => {
+                if x <= 5.0 && y <= 5.0 {
+                    Location::TopLeft
+                } else if x >= (width - 5) as _ && y <= 5.0 {
+                    Location::TopRight
+                } else if x > 5.0 && x < (width - 5) as _ && y < 5.0 {
+                    Location::Top
+                } else {
+                    for state in &self.buttons {
+                        if Self::in_button((x, y), state) {
+                            return Location::Button(state.button_kind);
+                        }
+                    }
+
+                    Location::Head
+                }
+            }
+
+            CursorArea::TopShadow => {
+                if x <= 5.0 {
+                    Location::TopLeft
+                } else if x >= (width - 5) as _ {
+                    Location::TopRight
+                } else {
+                    Location::Top
+                }
+            }
+
+            CursorArea::BottomShadow => {
+                if x <= 5.0 {
+                    Location::BottomLeft
+                } else if x >= (width - 5) as _ {
+                    Location::BottomRight
+                } else {
+                    Location::Bottom
+                }
+            }
+
+            CursorArea::LeftShadow => {
+                if y <= 5.0 {
+                    Location::TopLeft
+                } else if y >= (height - 5) as _ {
+                    Location::BottomLeft
+                } else {
+                    Location::Left
+                }
+            }
+
+            CursorArea::RightShadow => {
+                if y <= 5.0 {
+                    Location::TopRight
+                } else if y >= (height - 5) as _ {
+                    Location::BottomRight
+                } else {
+                    Location::Right
+                }
+            }
+
+            CursorArea::Window => {
+                Location::None
+                /*if x < 5.0 && y > 5.0 && y < (height - 5) as _ {
+                    Location::Left
+                } else if x > (width - 5) as _ && y > 5.0 && y < (height - 5) as _ {
+                    Location::Right
+                } else if x <= 5.0 && y >= (height - 5) as _ {
+                    Location::BottomLeft
+                } else if x >= (width - 5) as _ && y >= (height - 5) as _ {
+                    Location::BottomRight
+                } else if x > 5.0 && x < (width - 5) as _ && y > (width - 5) as _ {
+                    Location::Bottom
+                } else {
+                    Location::None
+                }*/
+            }
+        }
+
+        /*if x <= 5.0 && y <= 5.0 {
             Location::TopLeft
         } else if x >= (width - 5) as _ && y <= 5.0 {
             Location::TopRight
@@ -346,7 +490,7 @@ impl GtkFrame {
             }
         } else {
             Location::None
-        }
+        }*/
     }
 
     fn draw_head_bar(&mut self) -> anyhow::Result<bool> {
@@ -364,8 +508,8 @@ impl GtkFrame {
             Some(width) => width,
         };
 
-        let width = width.get();
-        let height = HEADER_SIZE;
+        let width = width.get() * self.scale_factor;
+        let height = HEADER_SIZE * self.scale_factor;
         let (buffer, canvas) = self.pool.create_buffer(
             width as _,
             height as _,
@@ -454,6 +598,121 @@ impl GtkFrame {
         Ok(should_sync)
     }
 
+    fn draw_shadow(&mut self, should_sync: bool) -> anyhow::Result<()> {
+        let border_paint = self.shadow_theme.border_paint();
+
+        for (shadow_part, shadow_surface) in [
+            ShadowPart::Top,
+            ShadowPart::Left,
+            ShadowPart::Right,
+            ShadowPart::Bottom,
+        ]
+        .iter()
+        .zip(&mut self.shadow_surfaces)
+        {
+            let width = shadow_surface.width * self.scale_factor;
+            let height = shadow_surface.height * self.scale_factor;
+
+            let (buffer, canvas) = self.pool.create_buffer(
+                width as _,
+                height as _,
+                (width * 4) as _,
+                wl_shm::Format::Argb8888,
+            )?;
+
+            // Create the pixmap and fill with transparent color.
+            let mut pixmap = PixmapMut::from_bytes(canvas, width, height)
+                .expect("create pixmap should always success");
+
+            // Fill everything with transparent background, since we draw rounded corners and
+            // do invisible borders to enlarge the input zone.
+            pixmap.fill(Color::TRANSPARENT);
+
+            if !self.state.intersects(WindowState::TILED) {
+                self.shadow.draw(
+                    &mut pixmap,
+                    self.scale_factor,
+                    self.state.contains(WindowState::ACTIVATED),
+                    *shadow_part,
+                );
+            }
+
+            // The visible border is one pt.
+            let visible_border_size = VISIBLE_BORDER_SIZE * self.scale_factor;
+
+            // XXX we do all the match using integral types and then convert to f32 in the
+            // end to ensure that result is finite.
+            let border_rect = match shadow_part {
+                ShadowPart::Left => {
+                    let x =
+                        (shadow_surface.x.unsigned_abs() * self.scale_factor) - visible_border_size;
+                    let y = shadow_surface.y.unsigned_abs() * self.scale_factor;
+                    Rect::from_xywh(
+                        x as f32,
+                        y as f32,
+                        visible_border_size as f32,
+                        (shadow_surface.height - y) as f32,
+                    )
+                }
+
+                ShadowPart::Right => {
+                    let y = shadow_surface.y.unsigned_abs() * self.scale_factor;
+                    Rect::from_xywh(
+                        0.,
+                        y as f32,
+                        visible_border_size as f32,
+                        (shadow_surface.height - y) as f32,
+                    )
+                }
+                // We draw small visible border only bellow the window surface, no need to
+                // handle `TOP`.
+                ShadowPart::Bottom => {
+                    let x =
+                        (shadow_surface.x.unsigned_abs() * self.scale_factor) - visible_border_size;
+                    Rect::from_xywh(
+                        x as f32,
+                        0.,
+                        (shadow_surface.width - 2 * x) as f32,
+                        visible_border_size as f32,
+                    )
+                }
+                _ => None,
+            };
+
+            // Fill the visible border, if present.
+            if let Some(border_rect) = border_rect {
+                pixmap.fill_rect(border_rect, &border_paint, Transform::identity(), None);
+            }
+
+            if should_sync {
+                shadow_surface.subsurface.set_sync();
+            } else {
+                shadow_surface.subsurface.set_desync();
+            }
+
+            shadow_surface
+                .surface
+                .set_buffer_scale(self.scale_factor as _);
+
+            shadow_surface
+                .subsurface
+                .set_position(shadow_surface.x, shadow_surface.y);
+            buffer.attach_to(&shadow_surface.surface)?;
+
+            if shadow_surface.surface.version() >= 4 {
+                shadow_surface
+                    .surface
+                    .damage_buffer(0, 0, i32::MAX, i32::MAX);
+            } else {
+                shadow_surface.surface.damage(0, 0, i32::MAX, i32::MAX);
+            }
+
+            shadow_surface.surface.commit();
+        }
+
+        Ok(())
+    }
+
     fn apply_button_state(mouse: &MouseState, button: &Button, state: &ButtonState) {
         let style_context = button.style_context();
         let mut state_flags = style_context.state();
@@ -526,4 +785,38 @@ impl GtkFrame {
 
         button
     }
+}
+
+fn init_shadow_surfaces_pos(shadow_surfaces: &mut [ShadowSurface; 4]) {
+    // top
+    let surface = &mut shadow_surfaces[0];
+    surface.x = -(BORDER_SIZE as i32);
+    surface.y = -(HEADER_SIZE as i32 + BORDER_SIZE as i32);
+    surface.height = BORDER_SIZE;
+
+    // left
+    let surface = &mut shadow_surfaces[1];
+    surface.x = -(BORDER_SIZE as i32);
+    surface.y = -(HEADER_SIZE as i32);
+    surface.width = BORDER_SIZE;
+
+    // right
+    let surface = &mut shadow_surfaces[2];
+    surface.y = -(HEADER_SIZE as i32);
+    surface.width = BORDER_SIZE;
+
+    // bottom
+    let surface = &mut shadow_surfaces[3];
+    surface.x = -(BORDER_SIZE as i32);
+    surface.height = BORDER_SIZE;
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum CursorArea {
+    Frame,
+    TopShadow,
+    BottomShadow,
+    LeftShadow,
+    RightShadow,
+    Window,
 }

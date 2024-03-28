@@ -45,16 +45,14 @@ pub fn get_button_layout() -> (bool, Vec<ButtonKind>) {
             (
                 true,
                 vec![
-                    ButtonKind::Minimize,
-                    ButtonKind::Maximize,
                     ButtonKind::Close,
+                    ButtonKind::Maximize,
+                    ButtonKind::Minimize,
                 ],
             )
         }
 
         Some((left, right)) => {
-            println!("{left} {right}");
-
             let buttons = collect_buttons(&left);
             if !buttons.is_empty() {
                 return (false, buttons);

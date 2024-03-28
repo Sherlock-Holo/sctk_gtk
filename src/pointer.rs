@@ -4,8 +4,6 @@ use smithay_client_toolkit::reexports::csd_frame::{
     CursorIcon, FrameAction, ResizeEdge, WindowManagerCapabilities, WindowState,
 };
 
-const BORDER_SIZE: u32 = 44;
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ButtonKind {
     Close,
