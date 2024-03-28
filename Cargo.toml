@@ -1,0 +1,10 @@
+[package]
+name = "sctk_gtk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+cairo-rs = "0.18"
+gtk = "0.18"
+smithay-client-toolkit = { version = "0.18.0", default_features = false }
