@@ -32,7 +32,7 @@ mod pointer;
 mod shadow;
 
 const HEADER_SIZE: u32 = 50;
-const BORDER_SIZE: u32 = 10;
+const BORDER_SIZE: u32 = 44;
 const VISIBLE_BORDER_SIZE: u32 = 1;
 
 static GTK_INIT_ONCE: Once = Once::new();
@@ -476,7 +476,7 @@ impl GtkFrame {
             )?
         };
         let cairo_context = Context::new(image_surface)?;
-        let header_bar = HeaderBar::builder().title(&self.title).build();
+        let header_bar = self.create_head_bar();
 
         let buttons = self
             .buttons
@@ -545,6 +545,18 @@ impl GtkFrame {
         self.header_bar_surface.commit();
 
         Ok(should_sync)
+    }
+
+    fn create_head_bar(&mut self) -> HeaderBar {
+        let header_bar = HeaderBar::builder().title(&self.title).build();
+        if !self.state.contains(WindowState::ACTIVATED) {
+            let style_context = header_bar.style_context();
+            let mut state_flags = style_context.state();
+            state_flags |= StateFlags::BACKDROP;
+            style_context.set_state(state_flags);
+        }
+
+        header_bar
     }
 
     fn draw_shadow(&mut self, should_sync: bool) -> anyhow::Result<()> {
@@ -679,7 +691,7 @@ impl GtkFrame {
             if button_state.button_kind == kind {
                 state_flags |= StateFlags::PRELIGHT;
 
-                if mouse.pressed {
+                if mouse.button_pressed {
                     state_flags |= StateFlags::ACTIVE;
                 }
             }

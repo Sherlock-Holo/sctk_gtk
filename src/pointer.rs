@@ -24,7 +24,7 @@ pub(crate) struct MouseState {
     /// The surface local location inside the surface.
     pub cursor_pos: Option<(f64, f64)>,
 
-    pub pressed: bool,
+    pub button_pressed: bool,
 
     /// The instant of the last click.
     last_normal_click: Option<Duration>,
@@ -40,7 +40,6 @@ impl MouseState {
         state: &WindowState,
         wm_capabilities: &WindowManagerCapabilities,
     ) -> Option<FrameAction> {
-        self.pressed = pressed;
         let maximized = state.contains(WindowState::MAXIMIZED);
 
         let action = match self.location {
@@ -52,14 +51,38 @@ impl MouseState {
             Location::BottomRight if resizable => FrameAction::Resize(ResizeEdge::BottomRight),
             Location::Right if resizable => FrameAction::Resize(ResizeEdge::Right),
             Location::TopRight if resizable => FrameAction::Resize(ResizeEdge::TopRight),
-            Location::Button(ButtonKind::Close) if !pressed => FrameAction::Close,
-            Location::Button(ButtonKind::Maximize) if !pressed && !maximized => {
-                FrameAction::Maximize
+
+            Location::Button(button_kind) => {
+                self.button_pressed = pressed;
+
+                match button_kind {
+                    ButtonKind::Close => {
+                        if !pressed {
+                            FrameAction::Close
+                        } else {
+                            return None;
+                        }
+                    }
+                    ButtonKind::Maximize => {
+                        if !pressed {
+                            if maximized {
+                                FrameAction::UnMaximize
+                            } else {
+                                FrameAction::Maximize
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                    ButtonKind::Minimize => {
+                        if !pressed {
+                            FrameAction::Minimize
+                        } else {
+                            return None;
+                        }
+                    }
+                }
             }
-            Location::Button(ButtonKind::Maximize) if !pressed && maximized => {
-                FrameAction::UnMaximize
-            }
-            Location::Button(ButtonKind::Minimize) if !pressed => FrameAction::Minimize,
 
             Location::Head
                 if pressed && wm_capabilities.contains(WindowManagerCapabilities::MAXIMIZE) =>
