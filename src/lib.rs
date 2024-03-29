@@ -3,7 +3,7 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 use std::{array, mem};
 
-use cairo::{Context, Format, ImageSurface};
+use gtk::cairo::{Context, Format, ImageSurface};
 use gtk::prelude::{
     ContainerExt, GtkWindowExt, HeaderBarExt, ImageExt, StyleContextExt, WidgetExt,
 };
@@ -329,7 +329,7 @@ impl GtkFrame {
 
     fn get_cursor_area(&mut self, surface_id: &ObjectId) -> CursorArea {
         if self.header_bar_surface.id() == *surface_id {
-            return CursorArea::Frame;
+            CursorArea::Frame
         } else {
             match self
                 .shadow_surfaces
@@ -361,9 +361,9 @@ impl GtkFrame {
             return;
         }
 
-        if let Some(cursor_pos) = self.mouse.cursor_pos {
+        if let Location::Button(kind) = self.mouse.location {
             for state in &self.buttons {
-                if Self::in_button(cursor_pos, state) {
+                if state.button_kind == kind {
                     self.dirty = true;
                     return;
                 }
@@ -438,59 +438,8 @@ impl GtkFrame {
                 }
             }
 
-            CursorArea::Window => {
-                Location::None
-                /*if x < 5.0 && y > 5.0 && y < (height - 5) as _ {
-                    Location::Left
-                } else if x > (width - 5) as _ && y > 5.0 && y < (height - 5) as _ {
-                    Location::Right
-                } else if x <= 5.0 && y >= (height - 5) as _ {
-                    Location::BottomLeft
-                } else if x >= (width - 5) as _ && y >= (height - 5) as _ {
-                    Location::BottomRight
-                } else if x > 5.0 && x < (width - 5) as _ && y > (width - 5) as _ {
-                    Location::Bottom
-                } else {
-                    Location::None
-                }*/
-            }
+            CursorArea::Window => Location::None,
         }
-
-        /*if x <= 5.0 && y <= 5.0 {
-            Location::TopLeft
-        } else if x >= (width - 5) as _ && y <= 5.0 {
-            Location::TopRight
-        } else if x < 5.0 && y > 5.0 && y < (height - 5) as _ {
-            Location::Left
-        } else if x > (width - 5) as _ && y > 5.0 && y < (height - 5) as _ {
-            Location::Right
-        } else if x <= 5.0 && y >= (height - 5) as _ {
-            Location::BottomLeft
-        } else if x >= (width - 5) as _ && y >= (height - 5) as _ {
-            Location::BottomRight
-        } else if x > 5.0 && x < (width - 5) as _ && y < 5.0 {
-            if !cursor_in_frame {
-                return Location::None;
-            }
-
-            Location::Top
-        } else if x > 5.0 && x < (width - 5) as _ && y > (width - 5) as _ {
-            Location::Bottom
-        } else if cursor_in_frame {
-            for state in &self.buttons {
-                if Self::in_button((x, y), state) {
-                    return Location::Button(state.button_kind);
-                }
-            }
-
-            if x > 5.0 && x < (width - 5) as _ && y > 5.0 {
-                Location::Head
-            } else {
-                Location::None
-            }
-        } else {
-            Location::None
-        }*/
     }
 
     fn draw_head_bar(&mut self) -> anyhow::Result<bool> {
@@ -564,7 +513,7 @@ impl GtkFrame {
             state.width = allocation.width() as _;
             state.height = allocation.height() as _;
 
-            Self::apply_button_state(&self.mouse, &button, state);
+            Self::apply_button_state(&self.mouse, &button, state, self.state);
         }
 
         // make sure gtk can draw cairo context
@@ -713,26 +662,28 @@ impl GtkFrame {
         Ok(())
     }
 
-    fn apply_button_state(mouse: &MouseState, button: &Button, state: &ButtonState) {
+    fn apply_button_state(
+        mouse: &MouseState,
+        button: &Button,
+        button_state: &ButtonState,
+        window_state: WindowState,
+    ) {
         let style_context = button.style_context();
         let mut state_flags = style_context.state();
 
-        if let Some(cursor_pos) = mouse.cursor_pos {
-            if Self::in_button(cursor_pos, state) {
-                state_flags |= StateFlags::PRELIGHT;
-            }
+        if !window_state.contains(WindowState::ACTIVATED) {
+            state_flags |= StateFlags::BACKDROP;
         }
 
-        // match state.cursor_state {
-        //     ButtonCursorState::Hovered => {
-        //         state_flags |= StateFlags::PRELIGHT;
-        //     }
-        //     ButtonCursorState::Clicked => {
-        //         state_flags |= StateFlags::PRELIGHT | StateFlags::ACTIVE;
-        //     }
+        if let Location::Button(kind) = mouse.location {
+            if button_state.button_kind == kind {
+                state_flags |= StateFlags::PRELIGHT;
 
-        //     _ => {}
-        // }
+                if mouse.pressed {
+                    state_flags |= StateFlags::ACTIVE;
+                }
+            }
+        }
 
         style_context.set_state(state_flags);
     }

@@ -24,6 +24,8 @@ pub(crate) struct MouseState {
     /// The surface local location inside the surface.
     pub cursor_pos: Option<(f64, f64)>,
 
+    pub pressed: bool,
+
     /// The instant of the last click.
     last_normal_click: Option<Duration>,
 }
@@ -38,7 +40,9 @@ impl MouseState {
         state: &WindowState,
         wm_capabilities: &WindowManagerCapabilities,
     ) -> Option<FrameAction> {
+        self.pressed = pressed;
         let maximized = state.contains(WindowState::MAXIMIZED);
+
         let action = match self.location {
             Location::Top if resizable => FrameAction::Resize(ResizeEdge::Top),
             Location::TopLeft if resizable => FrameAction::Resize(ResizeEdge::TopLeft),
@@ -56,6 +60,7 @@ impl MouseState {
                 FrameAction::UnMaximize
             }
             Location::Button(ButtonKind::Minimize) if !pressed => FrameAction::Minimize,
+
             Location::Head
                 if pressed && wm_capabilities.contains(WindowManagerCapabilities::MAXIMIZE) =>
             {
@@ -70,7 +75,9 @@ impl MouseState {
                     _ => FrameAction::Move,
                 }
             }
+
             Location::Head if pressed => FrameAction::Move,
+
             _ => return None,
         };
 
@@ -100,6 +107,7 @@ impl MouseState {
                     )
                 })
             }
+
             _ => None,
         }
     }

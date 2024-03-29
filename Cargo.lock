@@ -714,7 +714,6 @@ name = "sctk_gtk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cairo-rs",
  "gtk",
  "smithay-client-toolkit",
  "tiny-skia",
