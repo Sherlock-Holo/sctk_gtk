@@ -726,8 +726,15 @@ impl GtkFrame {
         button.set_valign(Align::Center);
         let style_context = button.style_context();
         style_context.add_class("titlebutton");
+
+        let icon = if self.state.contains(WindowState::MAXIMIZED) {
+            "window-restore-symbolic"
+        } else {
+            "window-maximize-symbolic"
+        };
+
         style_context.add_class("maximize");
-        let image = Image::from_icon_name(Some("window-maximize-symbolic"), IconSize::Menu);
+        let image = Image::from_icon_name(Some(icon), IconSize::Menu);
         image.set_use_fallback(true);
         button.add(&image);
         button.set_can_focus(false);
