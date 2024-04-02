@@ -35,6 +35,7 @@ const HEADER_SIZE: u32 = 50;
 const BORDER_SIZE: u32 = 44;
 const VISIBLE_BORDER_SIZE: u32 = 1;
 
+/// gtk can only init once
 static GTK_INIT_ONCE: Once = Once::new();
 
 #[derive(Debug)]
@@ -46,6 +47,9 @@ struct ButtonState {
     button_kind: ButtonKind,
 }
 
+/// Gtk style wayland frame
+///
+/// [`GtkFrame`] will create a gtk style frame and add gtk style shadow around the window
 #[derive(Debug)]
 pub struct GtkFrame {
     /// The drawable decorations, `None` when hidden.
@@ -65,20 +69,33 @@ pub struct GtkFrame {
 
     /// Whether the frame is resizable.
     resizable: bool,
+
+    /// Window width
     width: Option<NonZeroU32>,
+
+    /// Window height
     height: Option<NonZeroU32>,
 
+    /// Indicates the frame buttons at the end or start
     buttons_at_end: bool,
+
+    /// Buttons state
     buttons: Vec<ButtonState>,
 
     state: WindowState,
     wm_capabilities: WindowManagerCapabilities,
+
+    /// Mouse state
     mouse: MouseState,
+
+    /// Frame title
     title: String,
 
+    /// Frame wayland surface
     header_bar_surface: WlSurface,
     header_bar_subsurface: WlSubsurface,
 
+    /// Window shadow
     shadow: Shadow,
     shadow_surfaces: [ShadowSurface; 4],
     shadow_theme: ShadowTheme,
@@ -257,17 +274,25 @@ impl DecorationsFrame for GtkFrame {
 }
 
 impl GtkFrame {
-    pub fn new<State>(
+    /// Create a new [`GtkFrame`], if `gtk_init` is true, it will init gtk at most once
+    ///
+    /// # Panic
+    ///
+    /// if gtk init failed, will panic
+    pub fn new_with_gtk_init<State>(
         base_surface: &impl WaylandSurface,
         shm: &Shm,
         sub_compositor: Arc<SubcompositorState>,
         queue_handle: QueueHandle<State>,
+        gtk_init: bool,
     ) -> anyhow::Result<Self>
     where
         State: Dispatch<WlSurface, SurfaceData> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
     {
-        GTK_INIT_ONCE
-            .call_once(|| gtk::init().unwrap_or_else(|err| panic!("gtk init failed: {err}")));
+        if gtk_init {
+            GTK_INIT_ONCE
+                .call_once(|| gtk::init().unwrap_or_else(|err| panic!("gtk init failed: {err}")));
+        }
 
         let (buttons_at_end, buttons) = get_button_layout();
         let buttons = buttons
@@ -316,7 +341,6 @@ impl GtkFrame {
             buttons,
             state: WindowState::empty(),
             wm_capabilities: WindowManagerCapabilities::all(),
-            // mouse: (),
             mouse: Default::default(),
             title: String::new(),
             header_bar_surface: surface,
@@ -325,6 +349,23 @@ impl GtkFrame {
             shadow_surfaces,
             shadow_theme: ShadowTheme::auto(),
         })
+    }
+
+    /// Create a new [`GtkFrame`]
+    ///
+    /// # Panic
+    ///
+    /// if gtk init failed, will panic
+    pub fn new<State>(
+        base_surface: &impl WaylandSurface,
+        shm: &Shm,
+        sub_compositor: Arc<SubcompositorState>,
+        queue_handle: QueueHandle<State>,
+    ) -> anyhow::Result<Self>
+    where
+        State: Dispatch<WlSurface, SurfaceData> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
+    {
+        Self::new_with_gtk_init(base_surface, shm, sub_compositor, queue_handle, true)
     }
 
     fn get_cursor_area(&mut self, surface_id: &ObjectId) -> CursorArea {
